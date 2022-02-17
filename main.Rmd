@@ -1,0 +1,451 @@
+---
+title: "Customer purchase analysis"
+author: "jsuk"
+date: "2/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+
+## Load packages
+```{r, echo=TRUE, results='hide',  message=FALSE,  warning=FALSE}
+library(tidyverse); library(dplyr); library(ggplot2);
+library(sqldf);
+```
+
+---
+
+## Load dataset
+The original dataset is downloaded from Kaggle at the following [link](https://www.kaggle.com/mkechinov/ecommerce-purchase-history-from-jewelry-store). It contains purchase records from December 2018 to December 2021 (3 years) from a medium sized jewelry online store.
+
+```{r}
+# Load the data
+colnames = c('order_date', 'order_id', 'product_id', 'quantity', 'category_id', 'category', 
+             'brand_id', 'price', 'user_id', 'product_gender', 'color', 'type1', 'type2')
+raw = read.csv('data/jewelry.csv', col.names=colnames)
+dim(raw)
+```
+
+```{r, echo=TRUE, results='hide',  message=FALSE,  warning=FALSE}
+# Explore the dataset
+str(raw)
+```
+
+
+```{r, echo=TRUE, results='hide',  message=FALSE,  warning=FALSE}
+# Inspect rows with at least one missing values
+length(which(!complete.cases(raw)))
+```
+
+---
+
+## Objective
+In this notebook, I would like to explore the customer LTV. Firstly, I will create segments using purchase activeness measured by recency (date of the last purchase). This means that segmentation will be performed through manual filtering instead of statistical methods such as K-Means clustering. Then, LTV will be calculated using transition matrix to gauge customer purchase activeness across different segments.
+
+Additional features will be created, for example frequency, average purchase and maximum purchase, which will be used for exploratory analysis and modeling to predict customer activeness and expected revenue.
+
+---
+
+## Clean dataset
+In order to achieve the objective, we don't need to use the entire data columns. `order_date` and `price` columns are key features to discover recency of purchases by each user (`user_id`).
+
+```{r}
+# Subset dataset with necessary columns
+usecols = c('user_id', 'order_date', 'price')
+data = raw[, colnames(raw) %in% usecols]
+dim(data)
+```
+
+```{r}
+# Print rows with missing values
+head(data[!complete.cases(data), ], 20)
+```
+
+```{r, echo=TRUE, results='hide',  message=FALSE,  warning=FALSE}
+# Count unique user_id
+length(unique(data$user_id))
+```
+
+There are good diversity in unique users for segmentation
+
+
+```{r}
+# Plot histogram for price
+hist(data$price, breaks=100)
+```
+The `price` distribution is significantly skewed. Using the mean/median imputation might not be useful. While it might be interesting to make a price prediction model based on the available features, I will leave it as a future work and focus on the objective of LTV analysis.
+
+To continue, I will remove the incomplete records. They account for 5% of the entire dataset, which is relatively trivial as we have enough data (over 90k rows) to make inference even after removing them.
+
+```{r}
+# Drop rows with missing price / user_id
+data = data %>% drop_na()
+dim(data)
+```
+
+I will explore customer transition based on year. To facilitate the data manipulation and analysis, convert `order_date` column to date format (%Y-%m-%d).
+
+```{r}
+# Change data type from character to date
+data$order_date = as.Date(data$order_date)
+
+# Extract year
+data$year = as.numeric(format(data$order_date, '%Y'))
+```
+
+---
+
+## Feature engineering
+We will extract features needed for the analysis.
+
+In order to make segmentation, I will make an evaluation on the purchae activeness, using metrics like recency. For more granular segmentation analysis, customer's first purchase will also be relevant to see if the customer is relatively new or existing.
+
+**Recency** measures when is the date of latest purchase (first purchase is the date of first ever spending which is self-explanatory). In order to calculate these two metrics, we need to set a reference date of this analysis. Given the data ranges from December 2018 to December 2021 (3 years), I will assume that this analysis is performed in early 2022.
+
+For modeling, **frequency**, **average purchase** and **maximum purchase** will be useful to predict customer's activeness and next purchase. These features are easier to compute. Also, unlike commodity sales such as groceries, the basket size of jewelry is not large, and I will assume that an individual **price** of a transaction represents the entire purchase.
+
+```{r}
+# Explore price distribution
+# A single transaction accounts for fairly high receipt value (in US$)
+summary(data$price)
+```
+
+
+```{r}
+# Date range for order date in the dataset
+summary(data$order_date)
+```
+
+The dataset contains 3 year data ranging from 2019 to 2021.
+
+```{r}
+# Compute days from the reference date of analysis 
+ref_date = '2022-01-01'
+data$days_since = as.numeric(difftime(time1=ref_date, time2=data$order_date, units='days'))
+summary(data$days_since)
+```
+
+There are many ways to aggregate the data records by user id. In order to extract all metrics as one go, I will use a sql query and the reference code will follow. 
+
+```{r}
+# Create a SQL query to extract features
+# by user_id
+
+query = '
+  SELECT user_id,
+    MIN(days_since) recency,
+    MAX(days_since) first_purchase,
+    COUNT(*) frequency,
+    AVG(price) avg_purchase,
+    MAX(price) max_purchase
+  FROM data
+  GROUP BY user_id
+  ORDER BY user_id
+'
+
+customers_2021 = sqldf(query)
+tibble(customers_2021)
+```
+
+---
+
+## EDA: Exploratory analysis
+Most of the features are significantly skewed to right to the extent that visualization does not provide insights very well. It may be more effective to explore summary statistics.
+
+```{r}
+# Explore frequency
+summary(customers_2021$frequency)
+```
+
+
+```{r}
+# Explore average purchase
+summary(customers_2021$avg_purchase)
+```
+
+More than 75% (3rd quantity) purchased less than or equal to 2 purchases over the past 3 years. 
+
+The purchase cycle is pretty long whereas the purchase amount (measured in US dollars) is comparatively higher than the normal commodity goods.
+
+```{r}
+# Histograms of recency and first purchase together
+par(mfrow=c(1,2))
+hist(customers_2021$first_purchase, col=rgb(0,0,1,1/2), breaks=100, main='First purchase', xlab='Days towards 2021-01-01')
+hist(customers_2021$recency, col=rgb(1,0,0,1/2), breaks=100, main='Recency', xlab='Days towards 2021-01-01')
+```
+
+The plots shows that the distributions of first purchase and recency are very similar and overlapping. This aligns with the earlier finding that the purchase frequency is quite low in general (less than twice over 3 years) and the first and last are likely the same for customers.
+
+Using **first_purchase** feature does not greatly provide a additional information on whether a customer is new or existing. Therefore, for the segmentation analysis the variable will be ignored (only **recency** will be used.)
+
+
+---
+
+## Segmentation analysis
+
+Segmentation will be based on customer's purchase activeness, particularly recency of the purchase. Given the nature of infrequency purchase for the high-priced, luxury jewelry, the segments will be divided up by recency on annual basis. 
+
+The criteria will be as following:
+
+- `inactive`: recency > 2 years
+- `cold` : recency between 1 to 2 years
+- `active` : recency < 1 year
+
+In other words, customers who purchase less than 6 months ago from the reference data (2022-01-01) are considered **active** whereas those visits over  years are inactive.
+
+```{r}
+# Create 'segment' feature 
+# by applying the criteria as above
+customers_2021$segment = 'NA' # instantiate 'segment' column
+customers_2021$segment[which(customers_2021$recency >= 365*2)] = 'inactive'
+customers_2021$segment[which(customers_2021$recency < 365*2 & customers_2021$recency >= 365*1)] = 'cold'
+customers_2021$segment[which(customers_2021$recency < 365*1)] = 'active'
+
+# Set segment orders
+customers_2021$segment = factor(customers_2021$segment, levels=c('inactive', 'cold', 'active'))
+
+# Print the segment summary by counts
+ggplot(customers_2021, aes(segment)) + geom_bar()
+```
+
+```{r}
+# Proportion by segment in more details
+prop.table(table(customers_2021$segment))
+```
+
+It is encouraging that a large number (71%) of customers are either **active**, or purchased at least one jewelry over the last year. **Inactive** customers are significantly less (5%).
+
+
+--
+
+## Disover customer lifetime value (LTV)
+
+### Retrospective analysis
+
+I would like to discover how customers move across different segments over years. This transition dynamics will be represented in a matrix. In essence, transition plays a similar role as retention rate that is used for a standard customer lifetime value (LTV) calculation.
+
+In order to evaluate the transition between each segment, I will change my assumption that the analysis performed a year before the original reference date, therefore on 2021-01-01. This means that all transactions made in 2021 will be ignored and recency will be recalculated.
+
+```{r}
+query = '
+  SELECT user_id,
+    MIN(days_since) - 365 recency,
+    MAX(days_since) - 365 first_purchase,
+    COUNT(*) frequency,
+    AVG(price) avg_purchase,
+    MAX(price) max_purchase
+  FROM data
+  WHERE days_since > 365
+  GROUP BY 1
+  ORDER BY 1
+'
+
+customers_2020 = sqldf(query)
+tibble(customers_2020)
+```
+
+```{r}
+# Divide segments 
+# by applying the same criteria as above
+customers_2020$segment = 'NA' # instantiate 'segment' column
+customers_2020$segment[which(customers_2020$recency >= 365*2)] = 'inactive'
+customers_2020$segment[which(customers_2020$recency < 365*2 & customers_2020$recency >= 365*1)] = 'cold'
+customers_2020$segment[which(customers_2020$recency < 365*1)] = 'active'
+
+# Set segment orders
+customers_2020$segment = factor(customers_2020$segment, levels=c('inactive', 'cold', 'active'))
+
+# Print the segment summary by counts
+ggplot(customers_2020, aes(segment)) + geom_bar()
+```
+
+```{r}
+# Proportion by segment in more details
+prop.table(table(customers_2020$segment))
+```
+
+In this retrospective view, active customers also take a majority (85%) as of 2020 year-end. 
+
+However, recalling the earlier analysis, standing on 2021 year-end, 71% of customers stayed active - dropped during 2021. In the meantime, albeit trivial, inactive customers became larger (nearly zero to 5%) in 2021.
+
+
+### Construct a transition matrix
+By combining the two subset data, I can explore the change in segment in 2021. 
+
+```{r}
+# Combine the customers subsets
+customers_composite = merge(customers_2020, customers_2021, by='user_id', all.x=TRUE) # all customers in 2020 used
+tibble(customers_composite)
+```
+
+```{r}
+# Create a transition matrix using segments
+transition_matrix = table(customers_composite$segment.x, customers_composite$segment.y)
+transition_matrix = as.matrix(transition_matrix)
+names(dimnames(transition_matrix)) = c('Segment 2021', 'Segment 2022')
+transition_matrix
+```
+
+
+```{r}
+# Create probability matrix
+transition_matrix_prob = transition_matrix / rowSums(transition_matrix)
+transition_matrix_prob
+```
+
+A large number of customers became cold (no purchase for 1 year) from active in 2021, which is alarming. Yearly-basis retention rate is significantly low for the jewelry business due to infrequent purchase of high-priced jewelry products.
+
+Note that there is no way that active customers become inactive within one year given the definition of criteria. Nevertheless, the large turnover from cold to inactive (89%) implies that it is very likely that the customers in cold segment will become inactive in the following year of 2022.
+
+
+```{r}
+# Exploring customers who became active from inactive over 2021.
+customers_composite %>% filter(segment.x == 'inactive' & segment.y == 'active') 
+```
+On the other hand, the rate that inactivate customers become active is very low (only 1 customer). Exploring the case will give a good insight but samples are limited in the current dataset as above - only 1 customer record found.
+
+
+### Forecast customers by segment
+
+```{r}
+# Total spends by customer in 2021
+# will then be aggregated (average) by segment
+
+query = '
+  SELECT user_id, SUM(price) total_spends_2021
+  FROM data
+  WHERE year = 2021
+  GROUP BY user_id
+  ORDER BY user_id
+'
+
+spends_2021 = sqldf(query)
+spends_2021
+```
+
+```{r}
+# Add total spends data
+# fill NA with 0 (no purchase)
+customers_spends_2021 = merge(x=customers_2021, y=spends_2021, by='user_id', all.x=TRUE)
+customers_spends_2021$total_spends_2021[which(is.na(customers_spends_2021$total_spends_2021))] = 0   
+```
+
+```{r}
+# Average purchase by segment in 2021
+avg_segment_spends_2021 = aggregate(customers_spends_2021$total_spends_2021, by=list(customers_spends_2021$segment), mean)
+avg_segment_spends_2021
+```
+
+```{r}
+# Forecast for next 10 years starting from 2021 (base year)
+
+# Instantiate forecast matrix
+segment_orders = c('inactive', 'cold', 'active')
+segment_forecast = matrix(nrow=length(segment_orders), ncol=11)
+rownames(segment_forecast) = segment_orders
+colnames(segment_forecast) = 2021:2031
+
+# Input base year segment 
+segment_forecast[, 1] = table(customers_2021$segment)
+
+# Construct the forecast using transition matrix (probability)
+for (i in 2:11) {
+  segment_forecast[, i] = t(segment_forecast[, i-1]) %*% transition_matrix_prob    # matrix multiplication
+}
+segment_forecast
+```
+
+```{r}
+# Visualize the prediction
+par(mfrow=c(1,2))
+plot(segment_forecast[1,], type='l', main = 'Projection - inactive', xlab='years', ylab='count')
+plot(segment_forecast[3,], type='l', main = 'Projection - active', xlab='years', ylab='count')
+```
+As expected, inactive customers grows exponentially in the next 3 years until it gets plateaued.
+
+### Forecast LTV by segment
+```{r}
+# Multiply average spends (in 2021) by segment
+# by segment_forecast
+
+forecast_rev = avg_segment_spends_2021$x * segment_forecast
+forecast_rev
+```
+
+```{r}
+# Calculate expected yearly revenue
+forecast_rev_yearly = round(colSums(forecast_rev))
+barplot(forecast_rev_yearly, main='Yearly revenue forecast - 10 year projection')
+```
+A large proportion of customers transitioning into inactive explains an exponential decay in the projected yearly revenue. 
+
+## Adjusted LTV with Discounted cash flow
+The above LTV calculation does not consider the time value of money, so it does not properly reflex the cash value of the revenue projection in the current term. Let's make a quick adjustment.
+
+
+```{r}
+# Set a yearly discount rate - 3% assumption
+dc_rate = 0.03 
+discounts = ( 1 / (1 + dc_rate)^((1:11) - 1) ) # array of discount rate over next 10 years
+
+# Calculate discounted revenue projection
+forecast_disc_rev_yearly = forecast_rev_yearly * discounts
+barplot(forecast_disc_rev_yearly, main='Discounted Yearly revenue forecast - 10 year projection')
+```
+
+## Predictive analysis
+As the last step, I will build a model to make predictions for how much will an active customer purchase per a purchase (inactive customer will have no spends)
+
+The necessary data have been all created as a result of earlier work: `spends_2021` and `customers_2020`. 
+- **customers_spends_2021** : to create the target variables. Total spends by customer already exists in the dataset.
+- **customers_2020** : to extract predictor variables including recency, frequency, avg/max purchase amounts
+
+
+**Note |** The following workflow does not follow the conventional machine learning practices, where train/test set is spitted for modeling fit and evaluation. Rather, it is intended to make a statistical inference.
+
+
+As we are interested in active customers (inactive customers will make no spends), model should be fit using subset where customer spends in 2021 > 0.
+
+```{r}
+# Merge the dataset by customer id first
+df_forecast = merge(customers_2020, spends_2021, by='user_id', all.x=TRUE)
+head(df_forecast)
+```
+Null values in `total_spends_2021` column represents the customers made no spends in 2021. Therefore, create a subset by dropping NA.
+
+```{r}
+# Create a subset with customers with spends
+df_forecast_subset = df_forecast[complete.cases(df_forecast$total_spends_2021),]
+dim(df_forecast_subset)
+```
+
+The subset lost lots of information but 1615 records will be sufficient for this simple linear model.
+
+```{r}
+# Construct a model
+model = lm(formula=total_spends_2021~recency+avg_purchase+max_purchase, data=df_forecast_subset)
+summary(model)
+```
+
+```{r}
+# Plot to evaluate the model
+plot(x=df_forecast_subset$total_spends_2021, y=model$fitted.values, xlab='actual (spends)', ylab='predicted (spends)') 
+```
+During exploratory analysis, it is discovered that all the features are skewed. To improve the model, re-scale the features.
+
+```{r}
+# Construct a model
+model_v2 = lm(formula=log(total_spends_2021)~log(recency)+log(avg_purchase)+log(max_purchase),
+              data=df_forecast_subset)
+summary(model_v2)
+```
+
+```{r}
+plot(x=log(df_forecast_subset$total_spends_2021), y=model_v2$fitted.values, 
+     xlab='actual (spends)', ylab='predicted (spends)') 
+```
+Now, the plot shows rather linear model fit between the actual and predicted spends. 
